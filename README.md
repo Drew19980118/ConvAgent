@@ -93,6 +93,16 @@ conda activate chatr1
 python infer.py
 ```
 
+## More Resources
+
+Additional ChatR1 resources are available in the Hugging Face collection of [ChatR1](https://huggingface.co/collections/slupart/chatr1).
+
+
+- All datasets collection in jsonl format for TopiOCQA, QReCC, INSCIT, MultiDoc2Dial and FaithDial.
+- All E5 retrieval indexes are also provided for the datasets above.
+- ChatR1 checkpoints for models trained on QReCC and TopiOCQA on 3B and 7B backbones.
+- A unified dataset format for training and evaluation conversation of TopiOCQA, QReCC, INSCIT, MultiDoc2Dial and FaithDial in [here](https://huggingface.co/datasets/slupart/chatr1-convqa-all)
+
 
 ## Acknowledge
 
