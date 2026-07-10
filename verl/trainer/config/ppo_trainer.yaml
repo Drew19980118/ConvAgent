@@ -156,6 +156,7 @@ algorithm:
   adv_estimator: gae
   no_think_rl: False
   kl_penalty: kl  # how to estimate kl divergence
+  use_kl_in_reward: False
   kl_ctrl:
     type: fixed
     kl_coef: 0.001
@@ -167,15 +168,15 @@ trainer:
   total_epochs: 30
   total_training_steps: null
   project_name: verl_examples
-  experiment_name: gsm8k
+  experiment_name: inscit
   logger: [ 'console', 'wandb' ]
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
   test_freq: -1
   critic_warmup: 0
-  default_hdfs_dir: ~/experiments/gsm8k/ppo/${trainer.experiment_name}
-  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  default_hdfs_dir: ~/experiments/inscit/ppo/${trainer.experiment_name}
+  default_local_dir: checkpoints/${trainer.experiment_name}
   seed: 1
 
 max_turns: 10

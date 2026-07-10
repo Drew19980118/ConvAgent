@@ -298,3 +298,34 @@ def compute_score_f1(solution_str, ground_truth, method='strict', structure_form
         final_score = best_f1 + rewrite_score * f1_rewrite + retrieval_score * em_retrieval + structure_format_score * is_valid_format
 
         return final_score
+
+def f1_score_ConvAgent(prediction: str, ground_truth: str) -> float:
+    """
+    计算两个字符串之间的 token-level F1 分数（基于空格分词，忽略大小写）。
+
+    参数:
+        prediction: 模型预测的答案字符串
+        ground_truth: 标准答案字符串
+
+    返回:
+        float: F1 分数，范围 0.0 ~ 1.0
+    """
+    # 分词：转小写，按空白分割
+    pred_tokens = prediction.lower().split()
+    gt_tokens = ground_truth.lower().split()
+
+    # 极端情况处理
+    if not pred_tokens and not gt_tokens:
+        return 1.0  # 两者都为空，视为完全匹配
+    if not pred_tokens or not gt_tokens:
+        return 0.0  # 一方为空，另一方不为空
+
+    # 计算交集
+    common = set(pred_tokens) & set(gt_tokens)
+    if not common:
+        return 0.0
+
+    precision = len(common) / len(pred_tokens)
+    recall = len(common) / len(gt_tokens)
+    f1 = 2 * precision * recall / (precision + recall)
+    return f1

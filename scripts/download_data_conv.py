@@ -4,9 +4,14 @@ from datasets import load_dataset
 
 SAVE_ROOT = "data_conv"
 
+# targets = [
+#     ("topiocqa", "train", os.path.join(SAVE_ROOT, "topiocqa_train", "train.parquet")),
+#     ("topiocqa", "test",  os.path.join(SAVE_ROOT, "topiocqa_test",  "test.parquet")),
+# ]
+
 targets = [
-    ("topiocqa", "train", os.path.join(SAVE_ROOT, "topiocqa_train", "train.parquet")),
-    ("topiocqa", "test",  os.path.join(SAVE_ROOT, "topiocqa_test",  "test.parquet")),
+    ("qrecc", "train", os.path.join(SAVE_ROOT, "qrecc_train", "train.parquet")),
+    ("qrecc", "test",  os.path.join(SAVE_ROOT, "qrecc_test",  "test.parquet")),
 ]
 
 for subset, split, out_path in targets:

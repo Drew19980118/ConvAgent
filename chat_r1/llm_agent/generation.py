@@ -51,28 +51,60 @@ class LLMGenerationManager:
             padding="longest"
         )['input_ids']
 
-    def _postprocess_responses(self, responses: torch.Tensor) -> torch.Tensor:
-        """Process responses to stop at search operation or answer operation."""
+    # For ConvAgent
+    def _postprocess_responses(self, responses: torch.Tensor):
+        """Process responses to stop at search, clarify, or answer operation."""
         responses_str = self.tokenizer.batch_decode(
-            responses, 
+            responses,
             skip_special_tokens=True
         )
 
-        responses_str = [resp.split('</search>')[0] + '</search>'
-                 if '</search>' in resp 
-                 else resp.split('</answer>')[0] + '</answer>'
-                 if '</answer>' in resp 
-                 else resp
-                 for resp in responses_str]
+        # 按优先级截断：先检查 search，再 clarify，最后 answer
+        processed = []
+        for resp in responses_str:
+            if '</search>' in resp:
+                processed.append(resp.split('</search>')[0] + '</search>')
+            elif '</clarify>' in resp:  # ✅ 新增 clarify 截断
+                processed.append(resp.split('</clarify>')[0] + '</clarify>')
+            elif '</answer>' in resp:
+                processed.append(resp.split('</answer>')[0] + '</answer>')
+            else:
+                processed.append(resp)
 
+        # 保留原有的 no_think_rl 逻辑（未启用，但保留结构）
         if self.config.no_think_rl:
             raise ValueError('stop')
-            # if no_think_rl is enabled, only keep action in the str
-            actions, _ = self.env.postprocess_predictions(responses_str)
-            responses_str=[f"<answer>{envs[idx].ACTION_LOOKUP[action]}</answer>" for idx, action in enumerate(actions)]
-            print("RESPONSES:", responses_str)
-        responses = self._batch_tokenize(responses_str)
-        return responses, responses_str
+            # 如果启用，则提取动作并改写 responses_str（这里用 processed）
+            # actions, _ = self.env.postprocess_predictions(processed)
+            # processed = [f"<answer>{envs[idx].ACTION_LOOKUP[action]}</answer>" for idx, action in enumerate(actions)]
+            # print("RESPONSES:", processed)
+
+        responses = self._batch_tokenize(processed)
+        return responses, processed
+
+    # For ChatR1
+    # def _postprocess_responses(self, responses: torch.Tensor) -> torch.Tensor:
+    #     """Process responses to stop at search operation or answer operation."""
+    #     responses_str = self.tokenizer.batch_decode(
+    #         responses,
+    #         skip_special_tokens=True
+    #     )
+    #
+    #     responses_str = [resp.split('</search>')[0] + '</search>'
+    #              if '</search>' in resp
+    #              else resp.split('</answer>')[0] + '</answer>'
+    #              if '</answer>' in resp
+    #              else resp
+    #              for resp in responses_str]
+    #
+    #     if self.config.no_think_rl:
+    #         raise ValueError('stop')
+    #         # if no_think_rl is enabled, only keep action in the str
+    #         actions, _ = self.env.postprocess_predictions(responses_str)
+    #         responses_str=[f"<answer>{envs[idx].ACTION_LOOKUP[action]}</answer>" for idx, action in enumerate(actions)]
+    #         print("RESPONSES:", responses_str)
+    #     responses = self._batch_tokenize(responses_str)
+    #     return responses, responses_str
 
     def _process_next_obs(self, next_obs: List[str]) -> torch.Tensor:
         """Process next observations from environment."""
@@ -336,6 +368,11 @@ class LLMGenerationManager:
         meta_info['active_mask'] = active_mask.tolist()
         meta_info['valid_action_stats'] = valid_action_stats.tolist()
         meta_info['valid_search_stats'] = valid_search_stats.tolist()
+
+        meta_info['full_texts'] = self.tokenizer.batch_decode(
+            rollings.batch['input_ids'],
+            skip_special_tokens=False
+        )
         
         print("ACTIVE_TRAJ_NUM:", active_num_list)
         
@@ -373,23 +410,25 @@ class LLMGenerationManager:
         
         return final_output
 
-    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True) -> List[str]:
+    #     For ConvAgent
+    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True) -> List[
+        str]:
         """
         Execute predictions across multiple environments.
         NOTE: the function is the actual `step` function in the environment
         NOTE penalty_for_invalid is not included in observation shown to the LLM
-        
+
         Args:
             envs: List of environment instances
             predictions: List of action predictions
             pad_token: Token to use for padding
-            
+
         Returns:
             List of observation strings
         """
         cur_actions, contents = self.postprocess_predictions(predictions)
         next_obs, dones, valid_action, is_search = [], [], [], []
-        
+
         search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']
         if do_search:
             search_results = self.batch_search(search_queries)
@@ -398,65 +437,178 @@ class LLMGenerationManager:
             search_results = [''] * sum([1 for action in cur_actions if action == 'search'])
 
         for i, (action, active) in enumerate(zip(cur_actions, active_mask)):
-            
             if not active:
                 next_obs.append('')
                 dones.append(1)
                 valid_action.append(0)
                 is_search.append(0)
             else:
-                if action == 'answer':
+                # ✅ 修改这里：将 clarify 和 answer 都视为终止动作
+                if action in ['answer', 'clarify']:  # <noanswer> 会被解析为 'answer'
                     next_obs.append('')
-                    dones.append(1)
+                    dones.append(1)  # 轨迹终止
                     valid_action.append(1)
                     is_search.append(0)
                 elif action == 'search':
+                    # ... 搜索逻辑不变 ...
                     next_obs.append(f'\n\n<information>{search_results.pop(0).strip()}</information>\n\n')
                     dones.append(0)
                     valid_action.append(1)
                     is_search.append(1)
                 else:
                     next_obs.append(f'\nMy previous action is invalid. \
-If I want to search, I should put the query between <search> and </search>. \
-If I want to give the final answer, I should put the answer between <answer> and </answer>. Let me try again.\n')
+    If I want to search, I should put the query between <search> and </search>. \
+    If I want to give the final answer, I should put the answer between <answer> and </answer>. Let me try again.\n')
                     dones.append(0)
                     valid_action.append(0)
                     is_search.append(0)
-            
+
         assert len(search_results) == 0
-            
+
         return next_obs, dones, valid_action, is_search
 
+#     For ChatR1
+#     def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True) -> List[str]:
+#         """
+#         Execute predictions across multiple environments.
+#         NOTE: the function is the actual `step` function in the environment
+#         NOTE penalty_for_invalid is not included in observation shown to the LLM
+#
+#         Args:
+#             envs: List of environment instances
+#             predictions: List of action predictions
+#             pad_token: Token to use for padding
+#
+#         Returns:
+#             List of observation strings
+#         """
+#         cur_actions, contents = self.postprocess_predictions(predictions)
+#         next_obs, dones, valid_action, is_search = [], [], [], []
+#
+#         search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']
+#         if do_search:
+#             search_results = self.batch_search(search_queries)
+#             assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])
+#         else:
+#             search_results = [''] * sum([1 for action in cur_actions if action == 'search'])
+#
+#         for i, (action, active) in enumerate(zip(cur_actions, active_mask)):
+#
+#             if not active:
+#                 next_obs.append('')
+#                 dones.append(1)
+#                 valid_action.append(0)
+#                 is_search.append(0)
+#             else:
+#                 if action == 'answer':
+#                     next_obs.append('')
+#                     dones.append(1)
+#                     valid_action.append(1)
+#                     is_search.append(0)
+#                 elif action == 'search':
+#                     next_obs.append(f'\n\n<information>{search_results.pop(0).strip()}</information>\n\n')
+#                     dones.append(0)
+#                     valid_action.append(1)
+#                     is_search.append(1)
+#                 else:
+#                     next_obs.append(f'\nMy previous action is invalid. \
+# If I want to search, I should put the query between <search> and </search>. \
+# If I want to give the final answer, I should put the answer between <answer> and </answer>. Let me try again.\n')
+#                     dones.append(0)
+#                     valid_action.append(0)
+#                     is_search.append(0)
+#
+#         assert len(search_results) == 0
+#
+#         return next_obs, dones, valid_action, is_search
+
+    # For ConvAgent
     def postprocess_predictions(self, predictions: List[Any]) -> Tuple[List[int], List[bool]]:
-        """
-        Process (text-based) predictions from llm into actions and validity flags.
-        
-        Args:
-            predictions: List of raw predictions
-            
-        Returns:
-            Tuple of (actions list, validity flags list)
-        """
         actions = []
         contents = []
-                
+
         for prediction in predictions:
-            if isinstance(prediction, str): # for llm output
-                pattern = r'<(search|answer)>(.*?)</\1>'
+            if isinstance(prediction, str):
+                # ✅ 修改这里：支持 search, answer, clarify
+                pattern = r'<(search|answer|clarify)>(.*?)</\1>'
                 match = re.search(pattern, prediction, re.DOTALL)
                 if match:
-                    content = match.group(2).strip()  # Return only the content inside the tags
-                    action = match.group(1)
+                    content = match.group(2).strip()
+                    action = match.group(1)  # 可以是 'search', 'answer', 'clarify'
                 else:
                     content = ''
                     action = None
             else:
                 raise ValueError(f"Invalid prediction type: {type(prediction)}")
-            
+
             actions.append(action)
             contents.append(content)
-            
+
         return actions, contents
+
+    # For ChatR1
+    # def postprocess_predictions(self, predictions: List[Any]) -> Tuple[List[int], List[bool]]:
+    #     """
+    #     Process (text-based) predictions from llm into actions and validity flags.
+    #
+    #     Args:
+    #         predictions: List of raw predictions
+    #
+    #     Returns:
+    #         Tuple of (actions list, validity flags list)
+    #     """
+    #     actions = []
+    #     contents = []
+    #
+    #     for prediction in predictions:
+    #         if isinstance(prediction, str):  # for llm output
+    #             pattern = r'<(search|answer)>(.*?)</\1>'
+    #             match = re.search(pattern, prediction, re.DOTALL)
+    #             if match:
+    #                 content = match.group(2).strip()  # Return only the content inside the tags
+    #                 action = match.group(1)
+    #             else:
+    #                 content = ''
+    #                 action = None
+    #         else:
+    #             raise ValueError(f"Invalid prediction type: {type(prediction)}")
+    #
+    #         actions.append(action)
+    #         contents.append(content)
+    #
+    #     return actions, contents
+
+    # For ChatR1
+    # def postprocess_predictions(self, predictions: List[Any]) -> Tuple[List[int], List[bool]]:
+    #     """
+    #     Process (text-based) predictions from llm into actions and validity flags.
+    #
+    #     Args:
+    #         predictions: List of raw predictions
+    #
+    #     Returns:
+    #         Tuple of (actions list, validity flags list)
+    #     """
+    #     actions = []
+    #     contents = []
+    #
+    #     for prediction in predictions:
+    #         if isinstance(prediction, str): # for llm output
+    #             pattern = r'<(search|answer)>(.*?)</\1>'
+    #             match = re.search(pattern, prediction, re.DOTALL)
+    #             if match:
+    #                 content = match.group(2).strip()  # Return only the content inside the tags
+    #                 action = match.group(1)
+    #             else:
+    #                 content = ''
+    #                 action = None
+    #         else:
+    #             raise ValueError(f"Invalid prediction type: {type(prediction)}")
+    #
+    #         actions.append(action)
+    #         contents.append(content)
+    #
+    #     return actions, contents
 
     def batch_search(self, queries: List[str] = None) -> str:
         """

@@ -1,4 +1,5 @@
 #!/bin/sh
+eval "$(conda shell.bash hook)"
 # The following lines instruct Slurm to allocate one GPU.
 #SBATCH --job-name=eval_all
 ##SBATCH --partition gpu
@@ -16,19 +17,19 @@
 # Launched retrieval
 source ~/.bashrc
 
-conda activate retriever
-data_name=topiocqa 
-bash retrieval_launch_${data_name}.sh &
-
-sleep 3m
+#conda activate retriever
+#data_name=topiocqa
+#bash retrieval_launch_${data_name}.sh &
+#
+#sleep 3m
 
 # Generation
 conda activate chatr1
 # wandb login
 
-data_name=topiocqa
+data_name=qrecc
 export DATA_DIR=data_conv/${data_name}
-export BASE_MODEL="verl_checkpoints/chatr1-topiocqa-qwen2.5-3b-it-ppo"
+export BASE_MODEL="verl_checkpoints/chatr1-qrecc-qwen2.5-3b-it-ppo"
 
 export CUDA_VISIBLE_DEVICES=0,1
 export VLLM_ATTENTION_BACKEND=XFORMERS 

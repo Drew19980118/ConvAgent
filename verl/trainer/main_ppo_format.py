@@ -32,7 +32,8 @@ def _select_rm_score_fn(data_source):
     elif data_source in ['slupart/qrecc-rewrite-mistral', 'slupart/topiocqa-rewrite-mistral', 'slupart/cast20-rewrite-mistral', 'slupart/cast22-rewrite-mistral', 'slupart/ikat23-rewrite-mistral']:
         return qa_em_format_conv.compute_score_f1
     elif data_source in ['ultrachat', 'inscit']:
-        return qa_em_format_conv.compute_score_f1
+        # return qa_em_format_conv.compute_score_f1
+        return qa_em_format_conv.f1_score_ConvAgent
     elif data_source in ['faithdial', 'coqa', 'md2d', 'mantis', 'icconv']:
         return qa_em_format_conv.compute_score_f1
     else:
@@ -52,61 +53,185 @@ class RewardManager():
         self.retrieval_score = retrieval_score
         self.rewrite_score = rewrite_score
 
+    # For ConvAgent
     def __call__(self, data: DataProto):
-        """We will expand this function gradually based on the available datasets"""
-
-        # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
         if 'rm_scores' in data.batch.keys():
             return data.batch['rm_scores']
 
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
-        # all_scores = []
-
-        already_print_data_sources = {}
+        full_texts = data.meta_info.get('full_texts')
+        if full_texts is None:
+            # 安全 fallback（不含 information，但避免崩溃）
+            print("Warning: 'full_texts' not in meta_info. Constructing from prompts+responses.")
+            prompts = data.batch['prompts']
+            responses = data.batch['responses']
+            full_texts = []
+            for i in range(len(data)):
+                full_ids = torch.cat([prompts[i], responses[i]])
+                full_text = self.tokenizer.decode(full_ids, skip_special_tokens=False)
+                full_texts.append(full_text)
 
         for i in range(len(data)):
-            data_item = data[i]  # DataProtoItem
-
-            prompt_ids = data_item.batch['prompts']
-
-            prompt_length = prompt_ids.shape[-1]
-
-            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
-            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
-
-            response_ids = data_item.batch['responses']
-            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
-
-            # decode
-            sequences = torch.cat((valid_prompt_ids, valid_response_ids))
-            sequences_str = self.tokenizer.decode(sequences)
-
+            data_item = data[i]
+            full_text = full_texts[i]
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
-
-            # select rm_score
             data_source = data_item.non_tensor_batch['data_source']
             compute_score_fn = _select_rm_score_fn(data_source)
 
-            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, 
-                                     structure_format_score=self.structure_format_score, 
-                                     final_format_score=self.final_format_score, 
-                                     retrieval_score=self.retrieval_score,
-                                     format_score=self.format_score,
-                                     rewrite_score=self.rewrite_score)
+            # ---------- 1. 解析模型输出，确定动作类型并截断文本 ----------
+            # 检测 clarify
+            clarify_match = re.search(r'<clarify>.*?</clarify>', full_text, re.DOTALL)
+            has_clarify = clarify_match is not None
 
-            reward_tensor[i, valid_response_length - 1] = score
-            # all_scores.append(score)
+            # 提取所有 answer（取最后一个）
+            answer_matches = list(re.finditer(r'<answer>(.*?)</answer>', full_text, re.DOTALL))
+            pred_answer = None
+            last_answer_match = None
+            if answer_matches:
+                last_answer_match = answer_matches[-1]
+                pred_answer = last_answer_match.group(1).strip()
 
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
+            # 初始化变量
+            truncated_text = full_text  # 默认不截断
+            action_type = 'none'  # 可选: 'clarify', 'noanswer', 'answer', 'none'
+            outcome_score = 0.0
 
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
-                print(sequences_str)
+            if has_clarify:
+                # 优先级最高：clarify
+                action_type = 'clarify'
+                # 截断到 </clarify> 结束
+                end_pos = clarify_match.end()
+                truncated_text = full_text[:end_pos]
+                outcome_score = 0.0
+            elif pred_answer is not None:
+                # 有 answer，判断是否为 noanswer
+                noanswer_keywords = ['sorry', 'not find', 'no information', 'unable to find', 'did not find']
+                has_noanswer = any(kw in pred_answer.lower() for kw in noanswer_keywords)
+                if has_noanswer:
+                    action_type = 'nonanswer'
+                else:
+                    action_type = 'answer'
+                # 截断到最后一个 </answer> 结束
+                end_pos = last_answer_match.end()
+                truncated_text = full_text[:end_pos]
+                # outcome 仅当正常 answer 时稍后计算，否则保持 0
+            else:
+                # 无任何终止标签
+                action_type = 'none'
+                # 不截断，outcome 为 0
+
+            # ---------- 2. 提取信息增益文本（基于截断后的文本） ----------
+            info_matches = re.findall(r'<information>(.*?)</information>', truncated_text, re.DOTALL)
+            info_text = ' '.join([m.strip() for m in info_matches])
+
+            # ---------- 3. 计算 R_outcome（仅当 action_type == 'answer'） ----------
+            if action_type == 'answer' and pred_answer:
+                for gt in ground_truth:
+                    score = compute_score_fn(pred_answer, gt['response'])
+                    if score > outcome_score:
+                        outcome_score = score
+            # 其他情况 outcome_score 已为 0
+
+            # ---------- 4. 计算 R_IG（只要有信息） ----------
+            ig_score = 0.0
+            if info_text:
+                for gt in ground_truth:
+                    score = compute_score_fn(info_text, gt['response'])
+                    if score > ig_score:
+                        ig_score = score
+
+            # ---------- 5. 计算 R_MIA ----------
+            mia_score = 0.0
+            # 确定模型预测的动作
+            if has_clarify:
+                pred_action = 'clarify'
+            elif action_type == 'noanswer':
+                pred_action = 'noanswer'
+            elif action_type == 'answer':
+                pred_action = 'answer'
+            else:
+                pred_action = None  # 无任何终止标签
+
+            # 从 ground_truth 中提取所有真实动作（去重）
+            true_actions = list(set([gt.get('action', 'answer') for gt in ground_truth]))
+
+            if pred_action is not None:
+                if pred_action in true_actions:
+                    mia_score = 1.0
+                else:
+                    mia_score = -0.5
+            else:
+                # 若模型未输出任何标签，不给予 MIA 奖惩（可根据需要设为 -0.5 或 0）
+                mia_score = 0.0
+
+            # ---------- 6. 加权求和 ----------
+            total_reward = outcome_score + 0.5 * (ig_score + mia_score)
+
+            # ---------- 7. 赋值给最后一个有效 token ----------
+            prompt_len = data_item.batch['prompts'].shape[0]
+            valid_len = data_item.batch['attention_mask'][prompt_len:].sum().item()
+            if valid_len > 0:
+                reward_tensor[i, valid_len - 1] = total_reward
 
         return reward_tensor
+
+    # For ChatR1
+    # def __call__(self, data: DataProto):
+    #     """We will expand this function gradually based on the available datasets"""
+    #
+    #     # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
+    #     if 'rm_scores' in data.batch.keys():
+    #         return data.batch['rm_scores']
+    #
+    #     reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+    #
+    #     # all_scores = []
+    #
+    #     already_print_data_sources = {}
+    #
+    #     for i in range(len(data)):
+    #         data_item = data[i]  # DataProtoItem
+    #
+    #         prompt_ids = data_item.batch['prompts']
+    #
+    #         prompt_length = prompt_ids.shape[-1]
+    #
+    #         valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+    #         valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+    #
+    #         response_ids = data_item.batch['responses']
+    #         valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+    #         valid_response_ids = response_ids[:valid_response_length]
+    #
+    #         # decode
+    #         sequences = torch.cat((valid_prompt_ids, valid_response_ids))
+    #         sequences_str = self.tokenizer.decode(sequences)
+    #
+    #         ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+    #
+    #         # select rm_score
+    #         data_source = data_item.non_tensor_batch['data_source']
+    #         compute_score_fn = _select_rm_score_fn(data_source)
+    #
+    #         score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth,
+    #                                  structure_format_score=self.structure_format_score,
+    #                                  final_format_score=self.final_format_score,
+    #                                  retrieval_score=self.retrieval_score,
+    #                                  format_score=self.format_score,
+    #                                  rewrite_score=self.rewrite_score)
+    #
+    #         reward_tensor[i, valid_response_length - 1] = score
+    #         # all_scores.append(score)
+    #
+    #         if data_source not in already_print_data_sources:
+    #             already_print_data_sources[data_source] = 0
+    #
+    #         if already_print_data_sources[data_source] < self.num_examine:
+    #             already_print_data_sources[data_source] += 1
+    #             print(sequences_str)
+    #
+    #     return reward_tensor
 
 
 import ray
@@ -119,13 +244,17 @@ def main(config):
         # this is for local ray cluster
         ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})
 
-    ray.get(main_task.remote(config))
+    # ray.get(main_task.remote(config))
+    main_task(config)
 
 
-@ray.remote
+# @ray.remote
 def main_task(config):
     from verl.utils.fs import copy_local_path_from_hdfs
     from transformers import AutoTokenizer
+
+    # import pydevd_pycharmn
+    # pydevd_pycharm.settrace('localhost', port=34769, stdoutToServer=True, stderrToServer=True)
 
     # print initial config
     from pprint import pprint

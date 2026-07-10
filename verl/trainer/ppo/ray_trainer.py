@@ -554,6 +554,7 @@ class RayPPOTrainer(object):
         else:
             for batch_dict in self.val_dataloader:
                 step_count += 1
+                pprint(f"当前正在处理 Validation batch {step_count}/{len(self.val_dataloader)}")
                 timing_raw = {}
                 test_batch: DataProto = DataProto.from_single_dict(batch_dict)
                 # test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
@@ -821,8 +822,12 @@ class RayPPOTrainer(object):
 
         # start training loop
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
-                print(f'epoch {epoch}, step {self.global_steps}')
+            total_batches = len(self.train_dataloader)
+            for batch_idx, batch_dict in enumerate(self.train_dataloader):
+                # 打印进度信息
+                print(f'epoch {epoch}/{self.config.trainer.total_epochs}, '
+                      f'batch {batch_idx + 1}/{total_batches}, '
+                      f'step {self.global_steps}')
                 metrics = {}
                 timing_raw = {}
 
@@ -850,6 +855,12 @@ class RayPPOTrainer(object):
                 ####################
                 # with _timer('step', timing_raw):
                     else:
+                        # 读取你想要的真正的 group size（比如 4）
+                        actual_n = 2  # 或者从 config 里读，但此时 config.rollout.n 已经是 1 了，你需要单独存一个变量
+
+                        # 把 gen_batch 复制 actual_n 份，让 Agent 独立跑 actual_n 条轨迹
+                        gen_batch = gen_batch.repeat(repeat_times=actual_n, interleave=True)
+
                         first_input_ids = gen_batch.batch['input_ids'][:, -gen_config.max_start_length:].clone().long()
 
                         with _timer('gen', timing_raw):
@@ -869,11 +880,21 @@ class RayPPOTrainer(object):
 
                         # batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                         #                                         dtype=object)
+
+                        batch = batch.repeat(repeat_times=actual_n, interleave=True)
+
                         batch.non_tensor_batch['uid'] = batch.non_tensor_batch['index'].copy()
-                                            
-                        # repeat to align with repeated responses in rollout
-                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+
                         batch = batch.union(final_gen_batch_output)
+
+                        batch.meta_info.update(final_gen_batch_output.meta_info)
+
+                        # For PPO
+                        # batch.non_tensor_batch['uid'] = batch.non_tensor_batch['index'].copy()
+                        #
+                        # # repeat to align with repeated responses in rollout
+                        # batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        # batch = batch.union(final_gen_batch_output)
 
                     ####################
                     ####################
@@ -926,11 +947,18 @@ class RayPPOTrainer(object):
                             batch.batch['token_level_rewards'] = batch.batch['token_level_scores']
 
                         # compute advantages, executed on the driver process
+                        # For PPO
+                        # batch = compute_advantage(batch,
+                        #                           adv_estimator=self.config.algorithm.adv_estimator,
+                        #                           gamma=self.config.algorithm.gamma,
+                        #                           lam=self.config.algorithm.lam,
+                        #                           num_repeat=self.config.actor_rollout_ref.rollout.n)
+
                         batch = compute_advantage(batch,
                                                   adv_estimator=self.config.algorithm.adv_estimator,
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
-                                                  num_repeat=self.config.actor_rollout_ref.rollout.n)
+                                                  num_repeat=actual_n)
 
                     # update critic
                     if self.use_critic:
@@ -956,8 +984,12 @@ class RayPPOTrainer(object):
                             val_metrics: dict = self._validate()
                         metrics.update(val_metrics)
 
-                    if self.config.trainer.save_freq > 0 and \
-                            self.global_steps % self.config.trainer.save_freq == 0:
+                    # if self.config.trainer.save_freq > 0 and \
+                    #         self.global_steps % self.config.trainer.save_freq == 0:
+                    #     with _timer('save_checkpoint', timing_raw):
+                    #         self._save_checkpoint()
+
+                    if self.global_steps % 100 == 0:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
 
@@ -971,8 +1003,12 @@ class RayPPOTrainer(object):
                 self.global_steps += 1
 
                 if self.global_steps >= self.total_training_steps:
+                    # ---------- 新增：训练结束保存一次 ----------
+                    with _timer('save_checkpoint', timing_raw):
+                        self._save_checkpoint()
+                    # ---------------------------------------
 
-                    # perform validation after training
+                    # 执行验证（原样）
                     if self.val_reward_fn is not None:
                         val_metrics = self._validate()
                         pprint(f'Final validation metrics: {val_metrics}')
