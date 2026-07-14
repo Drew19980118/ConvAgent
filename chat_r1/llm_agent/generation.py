@@ -632,13 +632,22 @@ class LLMGenerationManager:
         
         return requests.post(self.config.search_url, json=payload).json()
 
+    # for ChatR1
+    # def _passages2string(self, retrieval_result):
+    #     format_reference = ''
+    #     for idx, doc_item in enumerate(retrieval_result):
+    #
+    #         content = doc_item['document']['contents']
+    #         title = content.split("\n")[0]
+    #         text = "\n".join(content.split("\n")[1:])
+    #         format_reference += f"Doc {idx+1}(Title: {title}) {text}\n"
+    #
+    #     return format_reference
+
+    # for ConvAgent
     def _passages2string(self, retrieval_result):
         format_reference = ''
         for idx, doc_item in enumerate(retrieval_result):
-            
-            content = doc_item['document']['contents']
-            title = content.split("\n")[0]
-            text = "\n".join(content.split("\n")[1:])
-            format_reference += f"Doc {idx+1}(Title: {title}) {text}\n"
+            format_reference += f"passage_id: {doc_item['document']['passage_id']} (Title: {doc_item['document']['title']}) {doc_item['document']['passage_text']}\n"
 
         return format_reference

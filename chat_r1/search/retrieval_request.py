@@ -2,6 +2,13 @@ import requests
 import time
 import json
 
+def passages2string(retrieval_result):
+    format_reference = ''
+    for idx, doc_item in enumerate(retrieval_result):
+        format_reference += f"passage_id: {doc_item['document']['passage_id']} (Title: {doc_item['document']['title']}) {doc_item['document']['passage_text']}\n"
+
+    return format_reference
+
 url = "http://127.0.0.1:8002/retrieve"
 payload = {
     "queries": ["What is the capital of France?", "Explain neural networks."],
@@ -26,7 +33,9 @@ while True:
 
         # ====== 新增：打印响应内容 ======
         print("✅ 成功获取响应，内容如下：")
-        print(json.dumps(response.json(), indent=2, ensure_ascii=False))
+        results = response.json()['result']
+        results = [passages2string(result) for result in results]
+        result = results[0].strip()
         # ================================
 
         # 成功完成后退出循环

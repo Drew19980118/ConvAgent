@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Type, Dict
+from typing import Type, Dict, List
 
 import re
 import json
@@ -443,6 +443,27 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
+    def extract_passage_ids_from_full_text(full_text: str) -> List[str]:
+        """
+        从完整对话文本中提取所有 <information> 块中的 passage_id。
+        返回去重后的 passage_id 列表（字符串）。
+        """
+        import re
+        info_blocks = re.findall(r'<information>(.*?)</information>', full_text, re.DOTALL)
+        passage_ids = []
+        for block in info_blocks:
+            # 匹配 "passage_id: 123" 格式
+            matches = re.findall(r'passage_id:\s*(\d+)', block)
+            passage_ids.extend(matches)
+        # 去重并保持顺序（可选）
+        seen = set()
+        unique_ids = []
+        for pid in passage_ids:
+            if pid not in seen:
+                seen.add(pid)
+                unique_ids.append(pid)
+        return unique_ids
+
     def _validate(self):
         """
         The training loop of PPO with global metric computation.
@@ -541,12 +562,20 @@ class RayPPOTrainer(object):
                         # print("-------------------------------")
                         # print("-------------------------------")
                         # print("-------------------------------")
+                        # results.append({
+                        #     "data_source": make_json_serializable(test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]),
+                        #     "question": make_json_serializable(test_batch.non_tensor_batch['question'][i]),
+                        #     "golden_answers": make_json_serializable(test_batch.non_tensor_batch['golden_answers'][i]),
+                        #     "predicted_answer": make_json_serializable(predicted_answer),
+                        #     "raw_predicted_answer": make_json_serializable(raw_predicted_answer)
+                        # })
+                        # for ConvAgent
                         results.append({
                             "data_source": make_json_serializable(test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]),
-                            "question": make_json_serializable(test_batch.non_tensor_batch['question'][i]),
-                            "golden_answers": make_json_serializable(test_batch.non_tensor_batch['golden_answers'][i]),
+                            "golden_answers": make_json_serializable(test_batch.non_tensor_batch['reward_model'][i]['ground_truth']),
                             "predicted_answer": make_json_serializable(predicted_answer),
-                            "raw_predicted_answer": make_json_serializable(raw_predicted_answer)
+                            "raw_predicted_answer": make_json_serializable(raw_predicted_answer),
+                            "passage_ids": []
                         })
 
                 reward_tensor_lst.append(reward_tensor)
@@ -558,7 +587,7 @@ class RayPPOTrainer(object):
                 timing_raw = {}
                 test_batch: DataProto = DataProto.from_single_dict(batch_dict)
                 # test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
-                
+
                 test_gen_batch = test_batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
                 test_gen_batch.meta_info = {
                     'eos_token_id': self.tokenizer.eos_token_id,
@@ -577,6 +606,10 @@ class RayPPOTrainer(object):
                         )
                     
                     test_batch = test_batch.union(final_gen_batch_output)
+
+                    # for ConvAgent
+                    if 'full_texts' in final_gen_batch_output.meta_info:
+                        test_batch.meta_info['full_texts'] = final_gen_batch_output.meta_info['full_texts']
                     
                     for key in test_batch.batch.keys():
                         test_batch.batch[key] = test_batch.batch[key].long()
@@ -613,12 +646,25 @@ class RayPPOTrainer(object):
                         # print("-------------------------------")
                         # print("-------------------------------")
                         # print("-------------------------------")
+                        # ChatR1
+                        # results.append({
+                        #     "data_source": make_json_serializable(test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]),
+                        #     "question": make_json_serializable(test_batch.non_tensor_batch['question'][i]),
+                        #     "golden_answers": make_json_serializable(test_batch.non_tensor_batch['golden_answers'][i]),
+                        #     "predicted_answer": make_json_serializable(predicted_answer),
+                        #     "raw_predicted_answer": make_json_serializable(raw_predicted_answer)
+                        # })
+                        # ConvAgent
+                        # 获取完整对话文本
+                        full_text = test_batch.meta_info.get('full_texts', [''])[
+                            i] if 'full_texts' in test_batch.meta_info else ''
+                        passage_ids = self.extract_passage_ids_from_full_text(full_text) if full_text else []
                         results.append({
                             "data_source": make_json_serializable(test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]),
-                            "question": make_json_serializable(test_batch.non_tensor_batch['question'][i]),
-                            "golden_answers": make_json_serializable(test_batch.non_tensor_batch['golden_answers'][i]),
+                            "golden_answers": make_json_serializable(test_batch.non_tensor_batch['reward_model'][i]['ground_truth']),
                             "predicted_answer": make_json_serializable(predicted_answer),
-                            "raw_predicted_answer": make_json_serializable(raw_predicted_answer)
+                            "raw_predicted_answer": make_json_serializable(raw_predicted_answer),
+                            "passage_ids": passage_ids
                         })
                         # except:
                         #     print(f"Error processing index {i}")
