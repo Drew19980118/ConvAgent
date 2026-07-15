@@ -318,14 +318,6 @@ class LLMGenerationManager:
             next_obs_ids = self._process_next_obs(next_obs)
             
             # Update states
-
-            print(f"Before update: input_ids dtype = {rollings.batch['input_ids'].dtype}")
-            rollings = self._update_rolling_state(rollings, responses_ids, next_obs_ids)
-            print(f"After update: input_ids dtype = {rollings.batch['input_ids'].dtype}")
-
-            print(f"responses_ids dtype: {responses_ids.dtype if isinstance(responses_ids, torch.Tensor) else type(responses_ids)}")
-            print(f"next_obs_ids dtype: {next_obs_ids.dtype if isinstance(next_obs_ids, torch.Tensor) else type(next_obs_ids)}")
-
             original_right_side = self._update_right_side(
                 original_right_side,
                 responses_ids,
@@ -370,11 +362,6 @@ class LLMGenerationManager:
         meta_info['active_mask'] = active_mask.tolist()
         meta_info['valid_action_stats'] = valid_action_stats.tolist()
         meta_info['valid_search_stats'] = valid_search_stats.tolist()
-
-        meta_info['full_texts'] = self.tokenizer.batch_decode(
-            rollings.batch['input_ids'],
-            skip_special_tokens=False
-        )
         
         print("ACTIVE_TRAJ_NUM:", active_num_list)
         

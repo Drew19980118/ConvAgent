@@ -453,7 +453,7 @@ class RayPPOTrainer(object):
         passage_ids = []
         for block in info_blocks:
             # 匹配 "passage_id: 123" 格式
-            matches = re.findall(r'passage_id:\s*(\d+)', block)
+            matches = re.findall(r'passage_id:\s*(.*?)\s*\(Title:', block)
             passage_ids.extend(matches)
         # 去重并保持顺序（可选）
         seen = set()
@@ -573,9 +573,8 @@ class RayPPOTrainer(object):
                         results.append({
                             "data_source": make_json_serializable(test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]),
                             "golden_answers": make_json_serializable(test_batch.non_tensor_batch['reward_model'][i]['ground_truth']),
-                            "predicted_answer": make_json_serializable(predicted_answer),
                             "raw_predicted_answer": make_json_serializable(raw_predicted_answer),
-                            "passage_ids": []
+                            "predicted_passage_ids": []
                         })
 
                 reward_tensor_lst.append(reward_tensor)
@@ -655,16 +654,12 @@ class RayPPOTrainer(object):
                         #     "raw_predicted_answer": make_json_serializable(raw_predicted_answer)
                         # })
                         # ConvAgent
-                        # 获取完整对话文本
-                        full_text = test_batch.meta_info.get('full_texts', [''])[
-                            i] if 'full_texts' in test_batch.meta_info else ''
-                        passage_ids = self.extract_passage_ids_from_full_text(full_text) if full_text else []
+                        passage_ids = self.extract_passage_ids_from_full_text(raw_predicted_answer) if raw_predicted_answer else []
                         results.append({
                             "data_source": make_json_serializable(test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]),
                             "golden_answers": make_json_serializable(test_batch.non_tensor_batch['reward_model'][i]['ground_truth']),
-                            "predicted_answer": make_json_serializable(predicted_answer),
                             "raw_predicted_answer": make_json_serializable(raw_predicted_answer),
-                            "passage_ids": passage_ids
+                            "predicted_passage_ids": passage_ids
                         })
                         # except:
                         #     print(f"Error processing index {i}")
@@ -1048,7 +1043,7 @@ class RayPPOTrainer(object):
 
                 self.global_steps += 1
 
-                if self.global_steps >= 4:
+                if self.global_steps >= self.total_training_steps:
                     # ---------- 新增：训练结束保存一次 ----------
                     with _timer('save_checkpoint', timing_raw):
                         self._save_checkpoint()

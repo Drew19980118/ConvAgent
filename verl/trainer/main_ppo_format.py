@@ -74,18 +74,21 @@ class RewardManager():
 
         for i in range(len(data)):
             data_item = data[i]
-            full_text = full_texts[i]
+            # 获取该样本的response的有效长度（去除padding）
+            prompt_len = data_item.batch['prompts'].shape[0]  # 实际prompt长度
+            valid_response_len = data_item.batch['attention_mask'][prompt_len:].sum().item()
+            response_ids = data_item.batch['responses'][:valid_response_len]  # 有效token
+            response_text = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             data_source = data_item.non_tensor_batch['data_source']
             compute_score_fn = _select_rm_score_fn(data_source)
 
-            # ---------- 1. 解析模型输出，确定动作类型并截断文本 ----------
-            # 检测 clarify
-            clarify_match = re.search(r'<clarify>.*?</clarify>', full_text, re.DOTALL)
+            # 现在在 response_text 上解析
+            clarify_match = re.search(r'<clarify>.*?</clarify>', response_text, re.DOTALL)
             has_clarify = clarify_match is not None
 
-            # 提取所有 answer（取最后一个）
-            answer_matches = list(re.finditer(r'<answer>(.*?)</answer>', full_text, re.DOTALL))
+            answer_matches = list(re.finditer(r'<answer>(.*?)</answer>', response_text, re.DOTALL))
             pred_answer = None
             last_answer_match = None
             if answer_matches:
@@ -93,35 +96,29 @@ class RewardManager():
                 pred_answer = last_answer_match.group(1).strip()
 
             # 初始化变量
-            truncated_text = full_text  # 默认不截断
-            action_type = 'none'  # 可选: 'clarify', 'noanswer', 'answer', 'none'
+            truncated_text = response_text
+            action_type = 'none'
             outcome_score = 0.0
 
             if has_clarify:
-                # 优先级最高：clarify
                 action_type = 'clarify'
-                # 截断到 </clarify> 结束
                 end_pos = clarify_match.end()
-                truncated_text = full_text[:end_pos]
+                truncated_text = response_text[:end_pos]
                 outcome_score = 0.0
             elif pred_answer is not None:
-                # 有 answer，判断是否为 noanswer
                 noanswer_keywords = ['sorry', 'not find', 'no information', 'unable to find', 'did not find']
                 has_noanswer = any(kw in pred_answer.lower() for kw in noanswer_keywords)
                 if has_noanswer:
                     action_type = 'nonanswer'
                 else:
                     action_type = 'answer'
-                # 截断到最后一个 </answer> 结束
                 end_pos = last_answer_match.end()
-                truncated_text = full_text[:end_pos]
-                # outcome 仅当正常 answer 时稍后计算，否则保持 0
+                truncated_text = response_text[:end_pos]
             else:
-                # 无任何终止标签
                 action_type = 'none'
-                # 不截断，outcome 为 0
+                # 不截断
 
-            # ---------- 2. 提取信息增益文本（基于截断后的文本） ----------
+            # 提取信息（基于截断后的 response_text）
             info_matches = re.findall(r'<information>(.*?)</information>', truncated_text, re.DOTALL)
             info_text = ' '.join([m.strip() for m in info_matches])
 
