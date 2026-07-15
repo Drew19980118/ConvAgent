@@ -16,7 +16,7 @@ pip3 install vllm==0.6.3
 pip install -e .
 
 # flash attention 2
-pip3 install flash-attn --no-build-isolation
+pip3 install flash-attn --no-build-isolation --no-cache-dir
 pip install wandb
 ```
 
