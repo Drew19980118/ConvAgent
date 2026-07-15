@@ -108,7 +108,6 @@ class LLMGenerationManager:
 
     def _process_next_obs(self, next_obs: List[str]) -> torch.Tensor:
         """Process next observations from environment."""
-        
         next_obs_ids = self.tokenizer(
             next_obs, 
             padding='longest',
@@ -120,12 +119,12 @@ class LLMGenerationManager:
             print(f"[WARNING] OBSERVATION TOO LONG, CONSIDER CHANGING YOUR CONFIG, {next_obs_ids.shape[1]} & {self.config.max_obs_length}")            
             next_obs_ids = next_obs_ids[:, :self.config.max_obs_length]
 
-        return next_obs_ids
+        return next_obs_ids.long()
 
     def _update_rolling_state(self, rollings: DataProto, cur_responses: torch.Tensor, 
                             next_obs_ids: torch.Tensor) -> Dict:
         """Update rolling state with new responses and observations."""
-        # Concatenate and handle padding        
+        # Concatenate and handle padding
         new_input_ids = self.tensor_fn.concatenate_with_padding([
             rollings.batch['input_ids'],
             cur_responses,
@@ -319,11 +318,14 @@ class LLMGenerationManager:
             next_obs_ids = self._process_next_obs(next_obs)
             
             # Update states
-            rollings = self._update_rolling_state(
-                rollings,
-                responses_ids,
-                next_obs_ids
-            )
+
+            print(f"Before update: input_ids dtype = {rollings.batch['input_ids'].dtype}")
+            rollings = self._update_rolling_state(rollings, responses_ids, next_obs_ids)
+            print(f"After update: input_ids dtype = {rollings.batch['input_ids'].dtype}")
+
+            print(f"responses_ids dtype: {responses_ids.dtype if isinstance(responses_ids, torch.Tensor) else type(responses_ids)}")
+            print(f"next_obs_ids dtype: {next_obs_ids.dtype if isinstance(next_obs_ids, torch.Tensor) else type(next_obs_ids)}")
+
             original_right_side = self._update_right_side(
                 original_right_side,
                 responses_ids,
@@ -433,6 +435,13 @@ class LLMGenerationManager:
         if do_search:
             search_results = self.batch_search(search_queries)
             assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])
+            # ✅ 检查 search_results 中是否有非字符串元素
+            for idx, result in enumerate(search_results):
+                if not isinstance(result, str):
+                    print(f"❌ search_results[{idx}] 不是字符串！类型: {type(result)}, 值: {result}")
+                    # 强制转换为字符串
+                    search_results[idx] = str(result)
+                    print(f"   已强制转换为: {search_results[idx][:100]}...")  # 打印前100个字符
         else:
             search_results = [''] * sum([1 for action in cur_actions if action == 'search'])
 
@@ -464,6 +473,15 @@ class LLMGenerationManager:
                     is_search.append(0)
 
         assert len(search_results) == 0
+
+        # 返回前检查
+        for idx, obs in enumerate(next_obs):
+            if not isinstance(obs, str):
+                print(f"❌ 污染源：索引 {idx} 的元素不是 str，类型：{type(obs)}，值：{obs}")
+                # 可选：将其强制转为字符串以便临时继续
+                next_obs[idx] = str(obs)
+
+        assert all(isinstance(obs, str) for obs in next_obs), "next_obs 包含非字符串对象！"
 
         return next_obs, dones, valid_action, is_search
 

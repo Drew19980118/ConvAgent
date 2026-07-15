@@ -443,7 +443,7 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def extract_passage_ids_from_full_text(full_text: str) -> List[str]:
+    def extract_passage_ids_from_full_text(self, full_text: str) -> List[str]:
         """
         从完整对话文本中提取所有 <information> 块中的 passage_id。
         返回去重后的 passage_id 列表（字符串）。
@@ -902,7 +902,7 @@ class RayPPOTrainer(object):
                 # with _timer('step', timing_raw):
                     else:
                         # 读取你想要的真正的 group size（比如 4）
-                        actual_n = 2  # 或者从 config 里读，但此时 config.rollout.n 已经是 1 了，你需要单独存一个变量
+                        actual_n = 4  # 或者从 config 里读，但此时 config.rollout.n 已经是 1 了，你需要单独存一个变量
 
                         # 把 gen_batch 复制 actual_n 份，让 Agent 独立跑 actual_n 条轨迹
                         gen_batch = gen_batch.repeat(repeat_times=actual_n, interleave=True)
@@ -1048,7 +1048,7 @@ class RayPPOTrainer(object):
 
                 self.global_steps += 1
 
-                if self.global_steps >= self.total_training_steps:
+                if self.global_steps >= 4:
                     # ---------- 新增：训练结束保存一次 ----------
                     with _timer('save_checkpoint', timing_raw):
                         self._save_checkpoint()

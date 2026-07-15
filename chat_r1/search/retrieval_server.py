@@ -15,6 +15,8 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+
 def load_corpus(corpus_path: str):
     corpus = datasets.load_dataset(
         'json', 

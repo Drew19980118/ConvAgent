@@ -247,7 +247,7 @@ def is_search_correct(text: str, golden_search: str) -> bool:
     
     return best_f1
 
-
+# F1
 def compute_score_f1(solution_str, ground_truth, method='strict', structure_format_score=0, final_format_score=0, retrieval_score=0, format_score=0, score=1., rewrite_score=0):
     """The scoring function for F1.
 
