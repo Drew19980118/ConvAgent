@@ -169,7 +169,7 @@ trainer:
   total_training_steps: null
   project_name: verl_examples
   experiment_name: inscit
-  logger: [ 'console', 'file' ]
+  logger: [ 'console', 'mlflow' ]
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
