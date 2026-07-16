@@ -1030,7 +1030,7 @@ class RayPPOTrainer(object):
                     #     with _timer('save_checkpoint', timing_raw):
                     #         self._save_checkpoint()
 
-                    if self.global_steps % 100 == 0:
+                    if self.global_steps % 20 == 0:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
 
