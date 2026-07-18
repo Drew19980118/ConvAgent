@@ -25,13 +25,13 @@ import numpy as np
 def _select_rm_score_fn(data_source):
     if data_source in ['nq', 'triviaqa', 'popqa', 'hotpotqa', '2wikimultihopqa', 'musique', 'bamboogle']:
         return qa_em_format_conv.compute_score_em
-    elif data_source in ['topiocqa', 'qrecc']:
+    elif data_source in ['qrecc']:
         return qa_em_format_conv.compute_score_f1
     elif data_source in ['wow', 'cast2020', 'cast2022', 'ikat2023', 'ikat2024', 'mtfiqa', 'mtclapnq', 'mtgovt', 'mtibmcloud']:
         return qa_em_format_conv.compute_score_f1
     elif data_source in ['slupart/qrecc-rewrite-mistral', 'slupart/topiocqa-rewrite-mistral', 'slupart/cast20-rewrite-mistral', 'slupart/cast22-rewrite-mistral', 'slupart/ikat23-rewrite-mistral']:
         return qa_em_format_conv.compute_score_f1
-    elif data_source in ['ultrachat', 'inscit']:
+    elif data_source in ['ultrachat', 'inscit', 'topiocqa']:
         # return qa_em_format_conv.compute_score_f1
         return qa_em_format_conv.f1_score_ConvAgent
     elif data_source in ['faithdial', 'coqa', 'md2d', 'mantis', 'icconv']:
@@ -75,16 +75,16 @@ class RewardManager():
         for i in range(len(data)):
             data_item = data[i]
             # 获取该样本的response的有效长度（去除padding）
-            prompt_len = data_item.batch['prompts'].shape[0]  # 实际prompt长度
+            prompt_len = data_item.batch['prompts'].shape[0]
             valid_response_len = data_item.batch['attention_mask'][prompt_len:].sum().item()
-            response_ids = data_item.batch['responses'][:valid_response_len]  # 有效token
+            response_ids = data_item.batch['responses'][:valid_response_len]
             response_text = self.tokenizer.decode(response_ids, skip_special_tokens=False)
 
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
             data_source = data_item.non_tensor_batch['data_source']
             compute_score_fn = _select_rm_score_fn(data_source)
 
-            # 现在在 response_text 上解析
+            # ---------- 1. 解析模型输出 ----------
             clarify_match = re.search(r'<clarify>.*?</clarify>', response_text, re.DOTALL)
             has_clarify = clarify_match is not None
 
@@ -95,78 +95,98 @@ class RewardManager():
                 last_answer_match = answer_matches[-1]
                 pred_answer = last_answer_match.group(1).strip()
 
-            # 初始化变量
-            truncated_text = response_text
-            action_type = 'none'
-            outcome_score = 0.0
-
+            # ---------- 2. 确定预测动作（统一为小写） ----------
             if has_clarify:
-                action_type = 'clarify'
-                end_pos = clarify_match.end()
-                truncated_text = response_text[:end_pos]
-                outcome_score = 0.0
+                pred_action = 'clarify'
             elif pred_answer is not None:
+                # 检查是否包含 noanswer 关键词
                 noanswer_keywords = ['sorry', 'not find', 'no information', 'unable to find', 'did not find']
-                has_noanswer = any(kw in pred_answer.lower() for kw in noanswer_keywords)
-                if has_noanswer:
-                    action_type = 'nonanswer'
+                if any(kw in pred_answer.lower() for kw in noanswer_keywords):
+                    pred_action = 'nonanswer'
                 else:
-                    action_type = 'answer'
-                end_pos = last_answer_match.end()
-                truncated_text = response_text[:end_pos]
+                    pred_action = 'answer'
             else:
-                action_type = 'none'
-                # 不截断
+                pred_action = None  # 未输出任何终止标签
 
-            # 提取信息（基于截断后的 response_text）
+            # ---------- 3. 截断文本（用于提取 <information>） ----------
+            if has_clarify:
+                end_pos = clarify_match.end()
+            elif last_answer_match is not None:
+                end_pos = last_answer_match.end()
+            else:
+                end_pos = len(response_text)
+            truncated_text = response_text[:end_pos]
+
             info_matches = re.findall(r'<information>(.*?)</information>', truncated_text, re.DOTALL)
             info_text = ' '.join([m.strip() for m in info_matches])
 
-            # ---------- 3. 计算 R_outcome（仅当 action_type == 'answer'） ----------
-            if action_type == 'answer' and pred_answer:
-                for gt in ground_truth:
-                    score = compute_score_fn(pred_answer, gt['response'])
-                    if score > outcome_score:
-                        outcome_score = score
-            # 其他情况 outcome_score 已为 0
+            # ---------- 4. 检测是否存在 MIA 监督信号 ----------
+            has_mia_labels = any('action' in gt for gt in ground_truth)
 
-            # ---------- 4. 计算 R_IG（只要有信息） ----------
+            # ---------- 5. 计算三种奖励 ----------
+            outcome_score = 0.0
             ig_score = 0.0
-            if info_text:
-                for gt in ground_truth:
-                    score = compute_score_fn(info_text, gt['response'])
-                    if score > ig_score:
-                        ig_score = score
-
-            # ---------- 5. 计算 R_MIA ----------
             mia_score = 0.0
-            # 确定模型预测的动作
-            if has_clarify:
-                pred_action = 'clarify'
-            elif action_type == 'noanswer':
-                pred_action = 'noanswer'
-            elif action_type == 'answer':
-                pred_action = 'answer'
-            else:
-                pred_action = None  # 无任何终止标签
 
-            # 从 ground_truth 中提取所有真实动作（去重）
-            true_actions = list(set([gt.get('action', 'answer') for gt in ground_truth]))
+            if has_mia_labels:
+                # === INSCIT 等含 MIA 标签的数据集 ===
+                # 找出所有与预测动作匹配的真实标签（可能有多个）
+                matched_gts = [gt for gt in ground_truth if gt.get('action', 'answer') == pred_action]
 
-            if pred_action is not None:
-                if pred_action in true_actions:
-                    mia_score = 1.0
+                if pred_action is not None:
+                    if matched_gts:
+                        # 动作正确：MIA = +1
+                        mia_score = 1.0
+
+                        # 仅当预测动作为 'answer' 时，计算事实性答案分数
+                        if pred_action == 'answer' and pred_answer:
+                            # 遍历所有匹配的 ground truth，取最高分
+                            for matched_gt in matched_gts:
+                                score = compute_score_fn(pred_answer, matched_gt['response'])
+                                if score > outcome_score:
+                                    outcome_score = score
+                                if info_text:
+                                    ig_score_candidate = compute_score_fn(info_text, matched_gt['response'])
+                                    if ig_score_candidate > ig_score:
+                                        ig_score = ig_score_candidate
+                        # 若 pred_action 是 'clarify' 或 'noanswer'，outcome 和 IG 保持为 0
+                    else:
+                        # 动作错误：MIA = -0.5
+                        mia_score = -0.5
+                        # outcome 和 IG 保持为 0
                 else:
+                    # 未输出任何终止标签：视为无效动作，MIA = -0.5
                     mia_score = -0.5
+
             else:
-                # 若模型未输出任何标签，不给予 MIA 奖惩（可根据需要设为 -0.5 或 0）
+                # === TopiOCQA / QReCC / CORAL：无 MIA 标签，MIA 恒为 0 ===
                 mia_score = 0.0
 
-            # ---------- 6. 加权求和 ----------
+                # 正常计算 Outcome 和 IG（仅当预测动作为 'answer' 时）
+                if pred_action == 'answer' and pred_answer:
+                    # 这些数据集的 ground_truth 是纯答案列表（可能有多个同义答案）
+                    # 遍历所有 ground truth，取最高分（如 TopiOCQA 通常只有一个，但防御性编程）
+                    for gt in ground_truth:
+                        # 兼容两种格式：可能是字符串，也可能是包含 'response' 的字典
+                        if isinstance(gt, dict):
+                            candidate_answer = gt.get('response', '')
+                        else:
+                            candidate_answer = str(gt)
+
+                        score = compute_score_fn(pred_answer, candidate_answer)
+                        if score > outcome_score:
+                            outcome_score = score
+
+                        if info_text:
+                            ig_score_candidate = compute_score_fn(info_text, candidate_answer)
+                            if ig_score_candidate > ig_score:
+                                ig_score = ig_score_candidate
+                # 若预测的是 clarify/noanswer 或无标签，outcome 和 ig 保持为 0
+
+            # ---------- 6. 总奖励加权求和 ----------
             total_reward = outcome_score + 0.5 * (ig_score + mia_score)
 
             # ---------- 7. 赋值给最后一个有效 token ----------
-            prompt_len = data_item.batch['prompts'].shape[0]
             valid_len = data_item.batch['attention_mask'][prompt_len:].sum().item()
             if valid_len > 0:
                 reward_tensor[i, valid_len - 1] = total_reward

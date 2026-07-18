@@ -2,7 +2,6 @@ import argparse
 import os
 import glob
 from huggingface_hub import hf_hub_download
-
 import pyarrow.parquet as pq
 import orjson
 
@@ -12,53 +11,45 @@ args = parser.parse_args()
 
 os.makedirs(args.save_path, exist_ok=True)
 
-# ---- Index ----
-repo_id = "slupart/qrecc-e5-index"
+# ---- 仓库配置 ----
+repo_id = "DrewZhang/topiocqa-passages-index"
 
-for file in ["part_aa", "part_ab", "part_ac", "part_ad"]:
+# ---- 1. 下载 Parquet 分片（6个） ----
+print("Downloading parquet shards...")
+for i in range(1, 7):
     hf_hub_download(
         repo_id=repo_id,
-        filename=file,
-        subfolder="index",
+        filename=f"part_{i:03d}.parquet",
         repo_type="dataset",
         local_dir=args.save_path,
     )
 
-print(f"Index files saved to {args.save_path}")
-
-repo_id = "slupart/qrecc-passages"
-
-# Download all parquet shards
-# for i in range(9):
-#     hf_hub_download(
-#         repo_id=repo_id,
-#         filename=f"train-{i:05d}-of-00009.parquet",
-#         subfolder="data",
-#         repo_type="dataset",
-#         local_dir=args.save_path,
-#     )
-
-# Download all parquet shards (50 files: train-000.parquet ~ train-049.parquet)
-for i in range(55):
+# ---- 2. 下载 E5 索引分片（2个） ----
+print("Downloading E5 index shards...")
+index_files = [
+    "e5_Flat.index.part_aa",   # 注意：截图是 par_aa
+    "e5_Flat.index.part_ab"   # 截图是 part_ab（可能笔误，但照抄）
+]
+for fname in index_files:
     hf_hub_download(
         repo_id=repo_id,
-        filename=f"train-{i:03d}.parquet",   # 三位数字，如 train-000.parquet
-        subfolder="data",
+        filename=fname,
         repo_type="dataset",
         local_dir=args.save_path,
     )
 
-# Merge shards into one JSONL with only id and contents
-parquet_files = sorted(glob.glob(os.path.join(args.save_path, "data", "*.parquet")))
-out_file = os.path.join(args.save_path, "qrecc.jsonl")
+# ---- 3. 合并 parquet 为 JSONL（只保留 passage_id 和 passage_text） ----
+parquet_files = sorted(glob.glob(os.path.join(args.save_path, "part_*.parquet")))
+out_file = os.path.join(args.save_path, "topiocqa_index.jsonl")
 
-
+print(f"Merging {len(parquet_files)} parquet shards into {out_file} ...")
 with open(out_file, "wb") as fout:
     for pf in parquet_files:
         pf_reader = pq.ParquetFile(pf)
-        for batch in pf_reader.iter_batches(batch_size=50_000, columns=["id", "contents"]):
+        for batch in pf_reader.iter_batches(batch_size=50_000, columns=["passage_id", "passage_text"]):
             rows = batch.to_pylist()
             fout.write(b"\n".join(orjson.dumps(r) for r in rows))
             fout.write(b"\n")
 
-print(f"Collection saved to {out_file}")
+print(f"✅ Collection saved to {out_file}")
+print(f"✅ Index files saved to {args.save_path}")

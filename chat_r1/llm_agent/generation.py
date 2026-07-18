@@ -653,6 +653,6 @@ class LLMGenerationManager:
     def _passages2string(self, retrieval_result):
         format_reference = ''
         for idx, doc_item in enumerate(retrieval_result):
-            format_reference += f"passage_id: {doc_item['document']['passage_id']} (Title: {doc_item['document']['title']}) {doc_item['document']['passage_text']}\n"
+            format_reference += f"passage_id: {doc_item['document']['passage_id']} (Text: {doc_item['document']['passage_text']})\n"
 
         return format_reference

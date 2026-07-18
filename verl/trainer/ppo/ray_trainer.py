@@ -443,19 +443,26 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def extract_passage_ids_from_full_text(self, full_text: str) -> List[str]:
+    def extract_passage_ids_from_full_text(self, full_text: str, data_source: str = None) -> List[str]:
         """
-        从完整对话文本中提取所有 <information> 块中的 passage_id。
-        返回去重后的 passage_id 列表（字符串）。
+        从完整对话文本中提取所有 <information> 块中的 passage 标识。
+        若 data_source == 'topiocqa'，提取 (Text: ...) 中的文本内容；
+        否则提取 passage_id: 后面的数字。
         """
         import re
         info_blocks = re.findall(r'<information>(.*?)</information>', full_text, re.DOTALL)
         passage_ids = []
+
         for block in info_blocks:
-            # 匹配 "passage_id: 123" 格式
-            matches = re.findall(r'passage_id:\s*(.*?)\s*\(Title:', block)
+            if data_source == 'topiocqa':
+                # 匹配 "passage_id: ... (Text: 这里的内容)" 中的 Text 部分
+                matches = re.findall(r'Text:\s*(.*?)\s*\)', block, re.DOTALL)
+            else:
+                # 原有逻辑：匹配 "passage_id: 123"
+                matches = re.findall(r'passage_id:\s*(.*?)\s*\(Text:', block, re.DOTALL)
             passage_ids.extend(matches)
-        # 去重并保持顺序（可选）
+
+        # 去重并保持顺序
         seen = set()
         unique_ids = []
         for pid in passage_ids:
@@ -654,7 +661,8 @@ class RayPPOTrainer(object):
                         #     "raw_predicted_answer": make_json_serializable(raw_predicted_answer)
                         # })
                         # ConvAgent
-                        passage_ids = self.extract_passage_ids_from_full_text(raw_predicted_answer) if raw_predicted_answer else []
+                        data_source = test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]
+                        passage_ids = self.extract_passage_ids_from_full_text(raw_predicted_answer, data_source) if raw_predicted_answer else []
                         results.append({
                             "data_source": make_json_serializable(test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]),
                             "golden_answers": make_json_serializable(test_batch.non_tensor_batch['reward_model'][i]['ground_truth']),
@@ -1030,7 +1038,7 @@ class RayPPOTrainer(object):
                     #     with _timer('save_checkpoint', timing_raw):
                     #         self._save_checkpoint()
 
-                    if self.global_steps % 20 == 0:
+                    if self.global_steps % 50 == 0:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
 
