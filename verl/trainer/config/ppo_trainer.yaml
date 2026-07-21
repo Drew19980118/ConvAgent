@@ -54,6 +54,8 @@ actor_rollout_ref:
       optimizer_offload: False
       fsdp_size: -1
   ref:
+    model:
+      path: null
     fsdp_config:
       param_offload: False
       wrap_policy:

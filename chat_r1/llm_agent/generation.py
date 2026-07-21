@@ -58,7 +58,7 @@ class LLMGenerationManager:
             responses,
             skip_special_tokens=True
         )
-
+        print('RESPONSES:', responses_str[0])
         # 按优先级截断：先检查 search，再 clarify，最后 answer
         processed = []
         for resp in responses_str:

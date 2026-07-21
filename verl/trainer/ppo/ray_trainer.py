@@ -1038,7 +1038,7 @@ class RayPPOTrainer(object):
                     #     with _timer('save_checkpoint', timing_raw):
                     #         self._save_checkpoint()
 
-                    if self.global_steps % 50 == 0:
+                    if self.global_steps % 10 == 0:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
 
@@ -1051,7 +1051,7 @@ class RayPPOTrainer(object):
 
                 self.global_steps += 1
 
-                if self.global_steps >= 600:
+                if self.global_steps >= 75:
                     # ---------- 新增：训练结束保存一次 ----------
                     with _timer('save_checkpoint', timing_raw):
                         self._save_checkpoint()
