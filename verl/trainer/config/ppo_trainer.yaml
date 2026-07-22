@@ -24,6 +24,7 @@ actor_rollout_ref:
     enable_gradient_checkpointing: False
     use_remove_padding: False
   actor:
+    dtype: bfloat16
     strategy: fsdp  # This is for backward-compatibility
     ppo_mini_batch_size: 256
     ppo_micro_batch_size: 64
@@ -54,6 +55,8 @@ actor_rollout_ref:
       optimizer_offload: False
       fsdp_size: -1
   ref:
+    use_amp: True
+    dtype: bfloat16
     model:
       path: null
     fsdp_config:
