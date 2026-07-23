@@ -1,5 +1,6 @@
 import torch
 import re
+import numpy as np
 from collections import defaultdict
 import os
 from typing import List, Dict, Any, Tuple
@@ -271,7 +272,7 @@ class LLMGenerationManager:
         padded_output.batch = trimmed_batch
         return padded_output
 
-    def run_llm_loop(self, gen_batch, initial_input_ids: torch.Tensor) -> Tuple[Dict, Dict]:
+    def run_llm_loop(self, gen_batch, initial_input_ids: torch.Tensor, data_sources) -> Tuple[Dict, Dict]:
         """Run main LLM generation loop."""
         
         original_left_side = {'input_ids': initial_input_ids[:, -self.config.max_start_length:]}
@@ -283,6 +284,9 @@ class LLMGenerationManager:
         valid_search_stats = torch.zeros(gen_batch.batch['input_ids'].shape[0], dtype=torch.int)
         active_num_list = [active_mask.sum().item()]
         rollings = gen_batch
+
+        batch_size = gen_batch.batch['input_ids'].shape[0]
+        first_search_ids = [None] * batch_size
 
         # Main generation loop
         for step in range(self.config.max_turns):
@@ -305,7 +309,10 @@ class LLMGenerationManager:
 
             # Execute in environment and process observations
             next_obs, dones, valid_action, is_search = self.execute_predictions(
-                responses_str, self.tokenizer.pad_token, active_mask
+                responses_str, self.tokenizer.pad_token, active_mask,
+                do_search=True,
+                first_search_ids=first_search_ids,
+                data_sources=data_sources  # 传入
             )
             
             curr_active_mask = torch.tensor([not done for done in dones], dtype=torch.bool)
@@ -342,8 +349,11 @@ class LLMGenerationManager:
             responses_ids, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_str, active_mask)
 
             # # Execute in environment and process observations
-            _, dones, valid_action, is_search = self.execute_predictions(
-                responses_str, self.tokenizer.pad_token, active_mask, do_search=False
+            next_obs, dones, valid_action, is_search = self.execute_predictions(
+                responses_str, self.tokenizer.pad_token, active_mask,
+                do_search=False,
+                first_search_ids=first_search_ids,
+                data_sources=data_sources
             )
 
             curr_active_mask = torch.tensor([not done for done in dones], dtype=torch.bool)
@@ -362,6 +372,7 @@ class LLMGenerationManager:
         meta_info['active_mask'] = active_mask.tolist()
         meta_info['valid_action_stats'] = valid_action_stats.tolist()
         meta_info['valid_search_stats'] = valid_search_stats.tolist()
+        meta_info['first_search_ids'] = first_search_ids
         
         print("ACTIVE_TRAJ_NUM:", active_num_list)
         
@@ -399,21 +410,28 @@ class LLMGenerationManager:
         
         return final_output
 
+    def _extract_passage_ids_from_search_result(self, block, data_source):
+        """
+        从检索返回的格式化字符串中提取标识符列表（按出现顺序）。
+        根据数据源使用不同正则：
+            - inscit: 提取 passage_id
+            - 其他: 提取 Text 内容（可自行调整）
+        """
+        if data_source != 'inscit':
+            # 例如，匹配 "Text: ..." 直到右括号
+            matches = re.findall(r'Text:\s*(.*?)\s*\)', block, re.DOTALL)
+        else:
+            matches = re.findall(r'passage_id:\s*(.*?)\s*\(Text:', block, re.DOTALL)
+        return matches  # 返回列表
+
     #     For ConvAgent
-    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True) -> List[
-        str]:
+    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True,
+                            first_search_ids=None, data_sources=None):
         """
         Execute predictions across multiple environments.
-        NOTE: the function is the actual `step` function in the environment
-        NOTE penalty_for_invalid is not included in observation shown to the LLM
-
-        Args:
-            envs: List of environment instances
-            predictions: List of action predictions
-            pad_token: Token to use for padding
-
         Returns:
-            List of observation strings
+            next_obs, dones, valid_action, is_search
+            (first_search_ids 会被原地修改)
         """
         cur_actions, contents = self.postprocess_predictions(predictions)
         next_obs, dones, valid_action, is_search = [], [], [], []
@@ -421,17 +439,14 @@ class LLMGenerationManager:
         search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']
         if do_search:
             search_results = self.batch_search(search_queries)
-            assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])
-            # ✅ 检查 search_results 中是否有非字符串元素
+            # 保证所有结果都是字符串
             for idx, result in enumerate(search_results):
                 if not isinstance(result, str):
-                    print(f"❌ search_results[{idx}] 不是字符串！类型: {type(result)}, 值: {result}")
-                    # 强制转换为字符串
                     search_results[idx] = str(result)
-                    print(f"   已强制转换为: {search_results[idx][:100]}...")  # 打印前100个字符
         else:
-            search_results = [''] * sum([1 for action in cur_actions if action == 'search'])
+            search_results = [''] * len(search_queries)  # 数量匹配
 
+        search_idx = 0  # 记录当前已处理的搜索序号
         for i, (action, active) in enumerate(zip(cur_actions, active_mask)):
             if not active:
                 next_obs.append('')
@@ -439,37 +454,36 @@ class LLMGenerationManager:
                 valid_action.append(0)
                 is_search.append(0)
             else:
-                # ✅ 修改这里：将 clarify 和 answer 都视为终止动作
-                if action in ['answer', 'clarify']:  # <noanswer> 会被解析为 'answer'
+                if action in ['answer', 'clarify']:
                     next_obs.append('')
-                    dones.append(1)  # 轨迹终止
+                    dones.append(1)
                     valid_action.append(1)
                     is_search.append(0)
                 elif action == 'search':
-                    # ... 搜索逻辑不变 ...
-                    next_obs.append(f'\n\n<information>{search_results.pop(0).strip()}</information>\n\n')
+                    current_result = search_results[search_idx]
+                    search_idx += 1
+
+                    # ---------- 新增：记录首次搜索的 passage_ids ----------
+                    if first_search_ids is not None and first_search_ids[i] is None:
+                        ids = self._extract_passage_ids_from_search_result(current_result, data_sources)
+                        first_search_ids[i] = ids  # 存储列表（通常 topk 个）
+                    # ---------------------------------------------------
+
+                    next_obs.append(f'\n\n<information>{current_result.strip()}</information>\n\n')
                     dones.append(0)
                     valid_action.append(1)
                     is_search.append(1)
                 else:
-                    next_obs.append(f'\nMy previous action is invalid. \
-    If I want to search, I should put the query between <search> and </search>. \
-    If I want to give the final answer, I should put the answer between <answer> and </answer>. Let me try again.\n')
+                    next_obs.append(f'\nMy previous action is invalid. ...\n')
                     dones.append(0)
                     valid_action.append(0)
                     is_search.append(0)
 
-        assert len(search_results) == 0
-
-        # 返回前检查
+        assert search_idx == len(search_results), "Mismatch in search results count"
+        # 确保所有 obs 为 str
         for idx, obs in enumerate(next_obs):
             if not isinstance(obs, str):
-                print(f"❌ 污染源：索引 {idx} 的元素不是 str，类型：{type(obs)}，值：{obs}")
-                # 可选：将其强制转为字符串以便临时继续
                 next_obs[idx] = str(obs)
-
-        assert all(isinstance(obs, str) for obs in next_obs), "next_obs 包含非字符串对象！"
-
         return next_obs, dones, valid_action, is_search
 
 #     For ChatR1

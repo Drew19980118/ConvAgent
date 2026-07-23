@@ -12,11 +12,11 @@ args = parser.parse_args()
 os.makedirs(args.save_path, exist_ok=True)
 
 # ---- 仓库配置 ----
-repo_id = "DrewZhang/topiocqa-passages-index"
+repo_id = "DrewZhang/qrecc-passages-index"
 
 # ---- 1. 下载 Parquet 分片（6个） ----
 print("Downloading parquet shards...")
-for i in range(1, 7):
+for i in range(1, 51):
     hf_hub_download(
         repo_id=repo_id,
         filename=f"part_{i:03d}.parquet",
@@ -27,8 +27,7 @@ for i in range(1, 7):
 # ---- 2. 下载 E5 索引分片（2个） ----
 print("Downloading E5 index shards...")
 index_files = [
-    "e5_Flat.index.part_aa",   # 注意：截图是 par_aa
-    "e5_Flat.index.part_ab"   # 截图是 part_ab（可能笔误，但照抄）
+    "e5_Flat.index.part_aa"
 ]
 for fname in index_files:
     hf_hub_download(
@@ -40,7 +39,7 @@ for fname in index_files:
 
 # ---- 3. 合并 parquet 为 JSONL（只保留 passage_id 和 passage_text） ----
 parquet_files = sorted(glob.glob(os.path.join(args.save_path, "part_*.parquet")))
-out_file = os.path.join(args.save_path, "topiocqa_index.jsonl")
+out_file = os.path.join(args.save_path, "qrecc_index.jsonl")
 
 print(f"Merging {len(parquet_files)} parquet shards into {out_file} ...")
 with open(out_file, "wb") as fout:

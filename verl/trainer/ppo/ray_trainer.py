@@ -443,34 +443,6 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
-    def extract_passage_ids_from_full_text(self, full_text: str, data_source: str = None) -> List[str]:
-        """
-        从完整对话文本中提取所有 <information> 块中的 passage 标识。
-        若 data_source == 'topiocqa'，提取 (Text: ...) 中的文本内容；
-        否则提取 passage_id: 后面的数字。
-        """
-        import re
-        info_blocks = re.findall(r'<information>(.*?)</information>', full_text, re.DOTALL)
-        passage_ids = []
-
-        for block in info_blocks:
-            if data_source == 'topiocqa':
-                # 匹配 "passage_id: ... (Text: 这里的内容)" 中的 Text 部分
-                matches = re.findall(r'Text:\s*(.*?)\s*\)', block, re.DOTALL)
-            else:
-                # 原有逻辑：匹配 "passage_id: 123"
-                matches = re.findall(r'passage_id:\s*(.*?)\s*\(Text:', block, re.DOTALL)
-            passage_ids.extend(matches)
-
-        # 去重并保持顺序
-        seen = set()
-        unique_ids = []
-        for pid in passage_ids:
-            if pid not in seen:
-                seen.add(pid)
-                unique_ids.append(pid)
-        return unique_ids
-
     def _validate(self):
         """
         The training loop of PPO with global metric computation.
@@ -609,9 +581,12 @@ class RayPPOTrainer(object):
                         final_gen_batch_output = generation_manager.run_llm_loop(
                             gen_batch=test_gen_batch,
                             initial_input_ids=first_input_ids,
+                            data_sources=self.config.trainer.experiment_name
                         )
                     
                     test_batch = test_batch.union(final_gen_batch_output)
+
+                    first_search_ids = test_batch.meta_info.get('first_search_ids', [None] * len(test_batch))
 
                     # for ConvAgent
                     if 'full_texts' in final_gen_batch_output.meta_info:
@@ -661,13 +636,12 @@ class RayPPOTrainer(object):
                         #     "raw_predicted_answer": make_json_serializable(raw_predicted_answer)
                         # })
                         # ConvAgent
-                        data_source = test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]
-                        passage_ids = self.extract_passage_ids_from_full_text(raw_predicted_answer, data_source) if raw_predicted_answer else []
+                        predicted_passage_ids = first_search_ids[i] if first_search_ids[i] is not None else []
                         results.append({
                             "data_source": make_json_serializable(test_batch.non_tensor_batch.get('data_source', ['unknown'])[i]),
                             "golden_answers": make_json_serializable(test_batch.non_tensor_batch['reward_model'][i]['ground_truth']),
-                            "raw_predicted_answer": make_json_serializable(raw_predicted_answer),
-                            "predicted_passage_ids": passage_ids
+                            "raw_predicted_answer": raw_predicted_answer,
+                            "predicted_passage_ids": predicted_passage_ids if predicted_passage_ids is not None else []
                         })
                         # except:
                         #     print(f"Error processing index {i}")
@@ -697,7 +671,7 @@ class RayPPOTrainer(object):
             os.makedirs(self.config.save_val_dir, exist_ok=True)
             save_path = os.path.join(self.config.save_val_dir, f'validation_results_step{self.global_steps}.json')
             with open(save_path, 'w') as f:
-                json.dump(results, f, indent=4)
+                json.dump(results, f, indent=4, default=lambda o: o.tolist() if isinstance(o, np.ndarray) else o)
             results=[]
                 # # Save results to JSON
                 # if self.config.save_val:
@@ -905,7 +879,7 @@ class RayPPOTrainer(object):
                 # with _timer('step', timing_raw):
                     else:
                         # 读取你想要的真正的 group size（比如 4）
-                        actual_n = 4  # 或者从 config 里读，但此时 config.rollout.n 已经是 1 了，你需要单独存一个变量
+                        actual_n = 8  # 或者从 config 里读，但此时 config.rollout.n 已经是 1 了，你需要单独存一个变量
 
                         # 把 gen_batch 复制 actual_n 份，让 Agent 独立跑 actual_n 条轨迹
                         gen_batch = gen_batch.repeat(repeat_times=actual_n, interleave=True)
@@ -917,6 +891,7 @@ class RayPPOTrainer(object):
                             final_gen_batch_output = generation_manager.run_llm_loop(
                                 gen_batch=gen_batch,
                                 initial_input_ids=first_input_ids,
+                                data_sources=self.config.trainer.experiment_name
                             )
 
                         # final_gen_batch_output.batch.apply(lambda x: x.long(), inplace=True)
@@ -1038,7 +1013,7 @@ class RayPPOTrainer(object):
                     #     with _timer('save_checkpoint', timing_raw):
                     #         self._save_checkpoint()
 
-                    if self.global_steps % 10 == 0:
+                    if self.global_steps % 15 == 0:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
 
